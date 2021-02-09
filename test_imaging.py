@@ -177,13 +177,13 @@ def calc_start_velo(targ, spw):
     return start_velo
 
 
-def concat_parallel_image(imagename):
+def concat_parallel_image(imagename, ext='image'):
     outfile = imagename + '.concat'
     if_exists_remove(outfile)
     ia.open(imagename)
     im_tool = ia.imageconcat(
             outfile=outfile,
-            infiles=imagename+'/*.image',
+            infiles=imagename+'/*.{0}'.format(ext),
             reorder=True,
     )
     im_tool.close()
@@ -215,19 +215,33 @@ def do_statwt_all():
         statwt(vis=vis, fitspw=BASELINE_CHANS)
 
 
-def split_test_data():
+def split_test_data(one_eb=True, few_chans=False):
     """
-    Split out a small test data set on one EB, one target, and a few channels
-    around the brightest NH3 (1,1) line.
+    Split out a small test data set on one EB, one target G28539, and the NH3
+    (1,1) line.
+
+    Parameters
+    ----------
+    one_eb : bool
+        Split just one execution block ms (the second one, a full block).
+    few_chan : bool
+        Split 63 chan (10 km/s) around the main NH3 (1,1) line.
     """
-    outputvis = ROOT_DIR + 'test_imaging/test_split_1eb.ms'
-    spw = '{0}:1159~1222'.format(SPWS['nh3_11'].spw_id)
-    split(
-        vis=VIS_FILES[1],
-        outputvis=outputvis,
-        field=TARGETS['G28539'].field,
-        spw=spw,
-    )
+    targ = TARGETS['G28539']
+    outputvis_base = ROOT_DIR + 'test_imaging/test_split'
+    if few_chans:
+        spw = '{0}:1159~1222'.format(SPWS['nh3_11'].spw_id)
+    else:
+        spw = '{0}'.format(SPWS['nh3_11'].spw_id)
+    all_vis = [VIS_FILES[1]] if one_eb else VIS_FILES
+    for i, vis in enumerate(all_vis):
+        outputvis = '{0}_eb{1}.ms'.format(outputvis_base, i)
+        split(
+            vis=vis,
+            outputvis=outputvis,
+            field=targ.field,
+            spw=spw,
+        )
 
 
 ###############################################################################
@@ -813,5 +827,140 @@ def export_moments(targ):
 def export_all_moments():
     for targ in TARGETS.values():
         export_moments(targ)
+
+
+###############################################################################
+# Gaincal tests
+###############################################################################
+
+VIS_FILES_TSELFCAL = sorted(glob(
+    ROOT_DIR+'test_imaging/test_selfcal/test_split_eb*.ms'
+))
+
+
+def test_populate_model_column():
+    """
+    Fill the model column using a start-model and an niter=0 with the savemodel
+    parameter. Important params:
+        (startmodel='foo.model', niter=0, savemodel='modelcolumn')
+    """
+    targ = TARGETS['G28539']
+    spw = SPWS['nh3_11']
+    test_path = 'test_imaging/test_selfcal/'
+    vis = test_path + 'test_split_1eb.ms'
+    startmodel = test_path + 'full_data_nh3_11.model.concat'
+    imagename = test_path + 'G28539_1eb'
+    start_velo = calc_start_velo(targ, spw)
+    for vis in VIS_FILES_TSELFCAL:
+        clearcal(vis=vis, addmodel=True)
+    check_delete_image_files(imagename)
+    tclean(
+        vis=VIS_FILES_TSELFCAL,
+        imagename=imagename,
+        field='0',
+        spw='0',
+        specmode='cube',
+        outframe='lsrk',
+        veltype='radio',
+        restfreq=spw.restfreq,
+        start=start_velo,
+        nchan=spw.nchan,
+        imsize=[350, 350],  # 175 as, 350 "efficient size"
+        cell='0.5arcsec',  # 3.4 as / 7
+        # gridder parameters
+        gridder='standard',
+        # deconvolver parameters
+        niter=0,
+        threshold='5mJy',
+        interactive=False,
+        verbose=True,
+        # startmodel parameters
+        startmodel=startmodel,
+        savemodel='modelcolumn',
+    )
+
+
+def test_gaincal_pcal1():
+    test_path = 'test_imaging/test_selfcal/'
+    for vis in VIS_FILES_TSELFCAL:
+        caltable = vis + '.pcal1_30s.cal'
+        cals = []
+        gaincal(
+                vis=vis,
+                caltable=caltable,
+                gaintable=cals,
+                gaintype='G',
+                solint='30s',
+                combine='',
+                #solnorm=True,
+                calmode='p',
+        )
+
+
+def test_applycal_pcal1():
+    for vis in VIS_FILES_TSELFCAL:
+        gaintable = [vis+'.pcal1.cal']
+        clearcal(vis=vis, addmodel=True)
+        applycal(
+                vis=vis,
+                gainfield='0',
+                gaintable=gaintable,
+                interp='linear',
+                applymode='calonly',
+                calwt=False,
+        )
+
+
+def test_image_pcal1_results():
+    """
+    Fill the model column using a start-model and an niter=0 with the savemodel
+    parameter. Important params:
+        (startmodel='foo.model', niter=0, savemodel='modelcolumn')
+    """
+    targ = TARGETS['G28539']
+    spw = SPWS['nh3_11']
+    test_path = 'test_imaging/test_selfcal/'
+    imagename = test_path + 'G28539_pcal1_30s'
+    start_velo = calc_start_velo(targ, spw)
+    check_delete_image_files(imagename, parallel=True)
+    tclean(
+        vis=VIS_FILES_TSELFCAL,
+        imagename=imagename,
+        field='0',
+        spw='0',
+        specmode='cube',
+        outframe='lsrk',
+        veltype='radio',
+        restfreq=spw.restfreq,
+        start=start_velo,
+        nchan=spw.nchan,
+        imsize=[350, 350],  # 175 as, 350 "efficient size"
+        cell='0.5arcsec',  # 3.4 as / 7
+        # gridder parameters
+        gridder='standard',
+        # deconvolver parameters
+        deconvolver='multiscale',
+        scales=[0, 7, 21],  # point, 1, 3 beam hpbw's
+        smallscalebias=0.6,
+        restoringbeam='common',
+        weighting='briggs',
+        robust=1.0,
+        niter=1000000,
+        threshold='1.8mJy',
+        cyclefactor=1.5,
+        interactive=False,
+        verbose=True,
+        parallel=True,
+        # automasking parameters
+        usemask='auto-multithresh',  # use ALMA 12m(short) values
+        noisethreshold=3.0,
+        sidelobethreshold=1.0,
+        lownoisethreshold=1.5,
+        minbeamfrac=2.0,
+        negativethreshold=1000.0,
+        # startmodel parameters
+        #savemodel='modelcolumn',
+        datacolumn='corrected',
+    )
 
 
